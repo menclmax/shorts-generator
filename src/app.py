@@ -1,29 +1,35 @@
 """FastAPI app: webhook + Drive watch setup."""
 
-import json
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, Request, BackgroundTasks
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from supabase import create_client
 
 from src.config import (
     GOOGLE_CREDENTIALS_PATH,
     SUPABASE_SERVICE_KEY,
     SUPABASE_URL,
     WATCHED_FOLDER_ID,
-    WEBHOOK_BASE_URL,
 )
-from src.drive import get_drive_service, list_new_videos
-from src.worker import run_worker
 
 app = FastAPI()
-supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+supabase = None
+
+
+def get_supabase():
+    global supabase
+    if supabase is None and SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        from supabase import create_client
+        supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+    return supabase
 
 
 def _get_existing_file_ids() -> set[str]:
-    r = supabase.table("jobs").select("drive_file_id").execute()
+    sb = get_supabase()
+    if not sb:
+        return set()
+    r = sb.table("jobs").select("drive_file_id").execute()
     return {row["drive_file_id"] for row in (r.data or [])}
 
 
@@ -55,7 +61,7 @@ async def drive_webhook(request: Request, background_tasks: BackgroundTasks):
                 if not any(x in mime for x in ["video", "mp4", "webm", "quicktime"]):
                     continue
             try:
-                supabase.table("jobs").insert({
+                get_supabase().table("jobs").insert({
                     "drive_file_id": f["id"],
                     "drive_file_name": f.get("name"),
                     "status": "pending",
@@ -85,7 +91,7 @@ async def sync_folder():
             if not any(x in mime.lower() for x in ["video", "mp4", "webm", "quicktime"]):
                 continue
             try:
-                supabase.table("jobs").insert({
+                get_supabase().table("jobs").insert({
                     "drive_file_id": f["id"],
                     "drive_file_name": f.get("name"),
                     "status": "pending",
@@ -104,7 +110,11 @@ def health():
 
 
 def start_worker():
-    threading.Thread(target=run_worker, daemon=True).start()
+    if SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        try:
+            threading.Thread(target=run_worker, daemon=True).start()
+        except Exception as e:
+            print(f"Worker failed to start: {e}")
 
 
 @app.on_event("startup")
